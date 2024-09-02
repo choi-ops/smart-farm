@@ -1,0 +1,131 @@
+
+import RPi.GPIO as GPIO
+import dht11
+import time
+import spidev
+import collections
+
+# DHT11 sensor pin
+DHT_PIN = 17
+# MCP3208 channel
+SOIL_MOISTURE_CHANNEL = 0
+# Digital soil moisture sensor pin
+SOIL_MOISTURE_DO_PIN = 21
+# Water pump motor pins
+MOTOR_B_1A = 19
+MOTOR_B_1B = 13
+# Light sensor digital pin
+LIGHT_SENSOR_DO_PIN = 5
+# LED pin
+LED_PIN = 6
+
+# SPI setup
+spi = spidev.SpiDev()
+spi.open(0, 0)  # SPI bus 0, device 0
+spi.max_speed_hz = 1350000
+
+# GPIO setup
+GPIO.setwarnings(False)
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(SOIL_MOISTURE_DO_PIN, GPIO.IN)
+GPIO.setup(MOTOR_B_1A, GPIO.OUT)
+GPIO.setup(MOTOR_B_1B, GPIO.OUT)
+GPIO.setup(LIGHT_SENSOR_DO_PIN, GPIO.IN)
+GPIO.setup(LED_PIN, GPIO.OUT)
+
+# DHT11 sensor initialization
+sensor = dht11.DHT11(pin=DHT_PIN)
+
+# Sample size setting
+NUM_SAMPLES = 10
+soil_moisture_readings = collections.deque(maxlen=NUM_SAMPLES)
+
+# Previous DHT11 values initialization
+previous_humidity = None
+previous_temperature = None
+
+def read_dht_sensor():
+    result = sensor.read()
+    if result.is_valid():
+        return result.humidity, result.temperature
+    else:
+        return None, None
+
+def read_soil_moisture(channel):
+    adc = spi.xfer2([1, (8 + channel) << 4, 0])
+    data = ((adc[1] & 3) << 8) + adc[2]
+    return data
+
+def get_stable_soil_moisture(channel):
+    reading = read_soil_moisture(channel)
+    soil_moisture_readings.append(reading)
+    average_reading = sum(soil_moisture_readings) / len(soil_moisture_readings)
+    return average_reading
+
+def read_digital_soil_moisture():
+    return GPIO.input(SOIL_MOISTURE_DO_PIN)
+
+def read_light_sensor():
+    return GPIO.input(LIGHT_SENSOR_DO_PIN)
+
+def control_water_pump(dry):
+    if dry:
+        GPIO.output(MOTOR_B_1A, GPIO.HIGH)
+        GPIO.output(MOTOR_B_1B, GPIO.LOW)
+    else:
+        GPIO.output(MOTOR_B_1A, GPIO.LOW)
+        GPIO.output(MOTOR_B_1B, GPIO.LOW)
+
+def control_led(dark):
+    if dark:
+        GPIO.output(LED_PIN, GPIO.HIGH)
+    else:
+        GPIO.output(LED_PIN, GPIO.LOW)
+
+def main():
+    global previous_humidity, previous_temperature
+
+    try:
+        while True:
+            humidity, temperature = read_dht_sensor()
+            soil_moisture = get_stable_soil_moisture(SOIL_MOISTURE_CHANNEL)
+            soil_moisture_digital = read_digital_soil_moisture()
+            light_level = read_light_sensor()
+
+            if humidity is not None and temperature is not None:
+                previous_humidity = humidity
+                previous_temperature = temperature
+                print("Temperature: {:.1f}占쏙옙C".format(temperature))
+                print("Humidity: {:.1f}%".format(humidity))
+            else:
+                if previous_humidity is not None and previous_temperature is not None:
+                    print("Temperature: {:.1f}C (previous)".format(previous_temperature))
+                    print("Humidity: {:.1f}% (previous)".format(previous_humidity))
+                else:
+                    print("")
+
+            # Convert analog soil moisture value 0-4095 to 0-100%
+            soil_moisture_percentage = (soil_moisture / 4095.0) * 100
+            print("Soil Moisture: {:.1f}%".format(soil_moisture_percentage))
+            print("Digital Soil Moisture: {}".format("Wet" if soil_moisture_digital == 0 else "Dry"))
+            
+            # Output "Light" if light is detected, "Dark" otherwise
+            if light_level == 0:
+                print("Light Level: Light")
+                control_led(False)  # Turn off LED
+            else:
+                print("Light Level: Dark")
+                control_led(True)  # Turn on LED
+
+            # Control water pump based on soil moisture
+            control_water_pump(soil_moisture_digital == 1)
+
+            time.sleep(1.0)  # 1 second delay
+    except KeyboardInterrupt:
+        print("Measurement stopped by user.")
+    finally:
+        GPIO.cleanup()
+        spi.close()
+
+if __name__ == "__main__":
+    main()
